@@ -1,0 +1,54 @@
+# Mirror the canonical Gitee repository into this GitHub repository.
+#
+# Source of truth: https://gitee.com/riscloud/dsh-ris-ide (default branch: master)
+# This file lives in the SOURCE repo, so every mirror push carries it back — do
+# not edit files on the GitHub side, they are overwritten on the next run.
+#
+# Push auth: secrets.GITHUB_TOKEN (the workflow asks for contents:write). If the
+# organization caps token permissions, create a fine-grained PAT with
+# "Contents: read and write" and expose it as secrets.MIRROR_TOKEN instead —
+# change the two ${...} references below.
+name: mirror-from-gitee
+
+on:
+  schedule:
+    # Every 2 hours (UTC), offset to avoid the top-of-hour load spike. GitHub
+    # only: the release job does NOT push here — Gitee is the source of truth and
+    # this scheduled pull brings over branches AND tags.
+    - cron: '17 */2 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: mirror-from-gitee
+  cancel-in-progress: true
+
+jobs:
+  mirror:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Mirror gitee/riscloud/dsh-ris-ide into this repo
+        env:
+          MIRROR_TOKEN: ${{ secrets.MIRROR_TOKEN || secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          # Bare mirror of the Gitee repo (branches + tags), then force-push all
+          # refs here. This repo is a read-only mirror: no GitHub-side commits.
+          # The network between GitHub runners and Gitee can be flaky, so retry
+          # the whole clone+push a few times before failing.
+          for attempt in 1 2 3; do
+            rm -rf mirror.git
+            if git clone --mirror https://gitee.com/riscloud/dsh-ris-ide.git mirror.git \
+               && git -C mirror.git push --mirror \
+                    "https://x-access-token:${MIRROR_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"; then
+              echo "mirrored on attempt ${attempt}: $(git -C mirror.git rev-parse --short HEAD)"
+              echo "tags: $(git -C mirror.git tag --list | tr '\n' ' ')"
+              exit 0
+            fi
+            echo "attempt ${attempt} failed; retrying in $((attempt * 15))s"
+            sleep $((attempt * 15))
+          done
+          echo "mirror failed after 3 attempts" >&2
+          exit 1
