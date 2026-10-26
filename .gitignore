@@ -1,0 +1,56 @@
+# 依赖
+node_modules
+.pnp
+.pnp.js
+
+# 构建产物
+dist
+dist-ssr
+target
+*.local
+
+# 自动生成的类型声明（由 unplugin 自动维护）
+src/auto-imports.d.ts
+src/components.d.ts
+
+# 日志
+logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# 编辑器 / IDE
+.idea
+.vscode/*
+!.vscode/extensions.json
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+# 系统
+.DS_Store
+Thumbs.db
+
+# 环境变量本地覆盖
+.env.local
+.env.*.local
+db
+.claude
+.db
+docs/*
+# 上架卡片用的截图（其余 docs/ 仍忽略；docs/* 会连目录一起忽略，故先反忽略目录）
+!docs/screenshots
+!docs/screenshots/**
+.e2e-local
+scripts
+
+# AI
+
+# npm 打包/发布临时产物
+.npm-cache/
+.npm-logs/
+*.tgz
