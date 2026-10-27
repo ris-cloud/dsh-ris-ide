@@ -1,0 +1,113 @@
+# Mirror the canonical Gitee repository into this GitHub repository.
+#
+# Source of truth: https://gitee.com/riscloud/dsh-ris-ide (default branch: master)
+# This file lives in the SOURCE repo, so every mirror push carries it back — do
+# not edit files on the GitHub side, they are overwritten on the next run.
+#
+# Push auth: secrets.GITHUB_TOKEN (the workflow asks for contents:write). If the
+# organization caps token permissions, create a fine-grained PAT with
+# "Contents: read and write" and expose it as secrets.MIRROR_TOKEN instead —
+# change the two ${...} references below.
+#
+# Release notes: `push --mirror` carries branches and tag OBJECTS only. GitHub
+# Releases are platform data, not git refs, so they are NOT mirrored — the second
+# step recreates them from the **Gitee 发行版** (public API, no token needed):
+# Jenkins builds that release from the notes authored in the gogs 版本发布 page
+# (release 名称 = title, 说明 = body). An annotated tag is used as a fallback
+# (older convention); a tag with neither is skipped on purpose (no backfill of
+# historical tags).
+name: mirror-from-gitee
+
+on:
+  schedule:
+    # Every 2 hours (UTC), offset to avoid the top-of-hour load spike. GitHub
+    # only: the release job does NOT push here — Gitee is the source of truth and
+    # this scheduled pull brings over branches AND tags.
+    - cron: '17 */2 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: mirror-from-gitee
+  cancel-in-progress: true
+
+jobs:
+  mirror:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Mirror gitee/riscloud/dsh-ris-ide into this repo
+        env:
+          MIRROR_TOKEN: ${{ secrets.MIRROR_TOKEN || secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          # Bare mirror of the Gitee repo (branches + tags), then force-push all
+          # refs here. This repo is a read-only mirror: no GitHub-side commits.
+          # The network between GitHub runners and Gitee can be flaky, so retry
+          # the whole clone+push a few times before failing.
+          for attempt in 1 2 3; do
+            rm -rf mirror.git
+            if git clone --mirror https://gitee.com/riscloud/dsh-ris-ide.git mirror.git \
+               && git -C mirror.git push --mirror \
+                    "https://x-access-token:${MIRROR_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"; then
+              echo "mirrored on attempt ${attempt}: $(git -C mirror.git rev-parse --short HEAD)"
+              echo "tags: $(git -C mirror.git tag --list | tr '\n' ' ')"
+              exit 0
+            fi
+            echo "attempt ${attempt} failed; retrying in $((attempt * 15))s"
+            sleep $((attempt * 15))
+          done
+          echo "mirror failed after 3 attempts" >&2
+          exit 1
+
+      - name: Sync GitHub Releases from Gitee 发行版 (tag annotations as fallback)
+        env:
+          GH_TOKEN: ${{ secrets.MIRROR_TOKEN || secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          # Release notes have exactly one source: the Gitee 发行版 for that tag
+          # (Jenkins publishes it from the notes written in the gogs 版本发布 page;
+          # the Gitee v5 release API is readable anonymously, so no token here).
+          # An annotated tag on the mirrored repo is a fallback for older releases.
+          # A tag with neither is skipped — historical tags are not backfilled.
+          API="https://gitee.com/api/v5/repos/riscloud/dsh-ris-ide/releases/tags"
+          json_field() {
+            node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{let j=null;try{j=JSON.parse(s)}catch(e){};process.stdout.write(j&&typeof j["'"$1"'"]==="string"?j["'"$1"'"]:"")})'
+          }
+          TAGS="$(git -C mirror.git for-each-ref --format='%(refname:short)' refs/tags \
+                  | grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -n 10 || true)"
+          if [ -z "${TAGS}" ]; then
+            echo "no release tags to sync"
+            exit 0
+          fi
+          for TAG in ${TAGS}; do
+            TITLE=""
+            BODY=""
+            if [ "$(git -C mirror.git cat-file -t "refs/tags/${TAG}")" = "tag" ]; then
+              TITLE="$(git -C mirror.git for-each-ref --format='%(contents:subject)' "refs/tags/${TAG}" | head -n 1)"
+              BODY="$(git -C mirror.git for-each-ref --format='%(contents:body)' "refs/tags/${TAG}")"
+            fi
+            if [ -z "${BODY}" ]; then
+              REL="$(curl -fsS "${API}/${TAG}" || true)"
+              case "${REL}" in
+                ""|"null") : ;;
+                *)
+                  TITLE="$(printf '%s' "${REL}" | json_field name)"
+                  BODY="$(printf '%s' "${REL}" | json_field body)"
+                  ;;
+              esac
+            fi
+            if [ -z "${BODY}" ]; then
+              echo "skip ${TAG}: no release notes (no Gitee 发行版, no annotated tag)"
+              continue
+            fi
+            [ -n "${TITLE}" ] || TITLE="${TAG}"
+            if gh release view "${TAG}" -R "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
+              gh release edit "${TAG}" -R "${GITHUB_REPOSITORY}" --title "${TITLE}" --notes "${BODY}"
+              echo "updated GitHub release ${TAG}: ${TITLE}"
+            else
+              gh release create "${TAG}" -R "${GITHUB_REPOSITORY}" --title "${TITLE}" --notes "${BODY}" --verify-tag
+              echo "created GitHub release ${TAG}: ${TITLE}"
+            fi
+          done
