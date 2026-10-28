@@ -1,0 +1,74 @@
+name: publish-npm
+
+# Publishes the newest release tag to the public npm registry with OIDC
+# trusted publishing (no npm token, nothing to rotate).
+#
+# How it fits together:
+#   - Jenkins (ris-jenkins/master_dsh-ris-ide, PUBLISH_PUBLIC) pushes a clean
+#     single-commit snapshot + a bare version tag (1.6.9) to Gitee.
+#   - mirror-from-gitee.yml copies branches and tags to this GitHub repository.
+#   - this workflow looks at the newest bare release tag, compares it with the
+#     version npm already has, and publishes the tag only when npm is behind.
+#
+# One-time setup on npmjs.com: package dsh-ris-ide -> Settings -> Trusted
+# Publishing -> GitHub Actions, Owner ris-cloud, Repository dsh-ris-ide,
+# Workflow publish-npm.yml, "Allow npm publish" enabled.
+
+on:
+  workflow_dispatch:
+  schedule:
+    # 6 minutes after mirror-from-gitee (17 */2 * * *) so fresh tags are here.
+    - cron: '23 */2 * * *'
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: publish-npm
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: pick the newest release tag
+        id: tag
+        run: |
+          set -euo pipefail
+          git fetch --tags --force --quiet
+          TAG="$(git tag --list | grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -1 || true)"
+          echo "newest release tag: ${TAG:-<none>}"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
+      - name: publish when npm is behind the tag
+        if: steps.tag.outputs.tag != ''
+        env:
+          TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          set -euo pipefail
+          REGISTRY=https://registry.npmjs.org/
+          PUBLISHED="$(npm view dsh-ris-ide version --registry "$REGISTRY" 2>/dev/null || true)"
+          echo "npm latest: ${PUBLISHED:-<none>} / tag: $TAG"
+          if [ "$PUBLISHED" = "$TAG" ]; then
+            echo "npm already has $TAG; nothing to do"
+            exit 0
+          fi
+          if [ -n "$PUBLISHED" ] && [ "$(printf '%s\n%s\n' "$PUBLISHED" "$TAG" | sort -V | tail -1)" = "$PUBLISHED" ]; then
+            echo "npm is newer ($PUBLISHED > $TAG); nothing to do"
+            exit 0
+          fi
+          git checkout --force "$TAG"
+          node -e "const p=require('./package.json');if(p.version!=='$TAG'){console.error('package.json version '+p.version+' does not match tag $TAG');process.exit(1)}"
+          # Trusted publishing needs npm >= 11.5.1.
+          npm install -g npm@latest
+          npm --version
+          # No --provenance: npm checks the provenance repository against
+          # package.json "repository.url", which points at the Gitee source (the
+          # GitHub repo is only a mirror), so provenance would fail validation.
+          # Trusted publishing itself does not need provenance.
+          npm publish --access public
