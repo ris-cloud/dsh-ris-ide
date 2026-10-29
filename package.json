@@ -1,0 +1,98 @@
+{
+  "name": "dsh-ris-ide",
+  "version": "1.7.1",
+  "license": "MIT",
+  "description": "RIS-IDE local dev panel for the DSH web GUI: live log tail, one-click start/stop of workspace programs, JDWP debugging, file tree + editor, and a standalone IDE window that carries no session history. · DSH 右侧栏本地开发面板：日志实时跟随、一键启停本地程序、Java 断点调试、文件树与编辑器、独立 IDE 窗口。",
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "deepseek-harness",
+    "cordis",
+    "ide",
+    "devtools",
+    "log-viewer",
+    "spring-boot",
+    "jdwp",
+    "debugger",
+    "file-tree",
+    "code-editor"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ris-cloud/dsh-ris-ide.git"
+  },
+  "homepage": "https://gitee.com/riscloud/dsh-ris-ide#readme",
+  "bugs": {
+    "url": "https://gitee.com/riscloud/dsh-ris-ide/issues"
+  },
+  "type": "module",
+  "main": "lib/index.js",
+  "exports": {
+    ".": "./lib/index.js",
+    "./client": "./lib/client.js",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib/index.js",
+    "lib/client.js",
+    "lib/debug",
+    "bin/run-with-log.sh",
+    "bin/run-with-log.ps1",
+    "test",
+    "cordis.patch.yml",
+    "README.md",
+    "skills",
+    "lib",
+    "LICENSE"
+  ],
+  "engines": {
+    "dsh": ">=0.2.0-rc.2"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/dsh-client-ui-sidebar-right": ">=0.2.1-rc.1",
+    "@deepseek-ai/dsh-client-ui-slots": ">=0.2.1-rc.1"
+  },
+  "peerDependenciesMeta": {
+    "@deepseek-ai/dsh-client-ui-sidebar-right": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-client-ui-slots": {
+      "optional": true
+    }
+  },
+  "dsh": {
+    "manifestVersion": 1,
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web"
+    }
+  },
+  "scripts": {
+    "test": "node --test \"test/*.test.mjs\"",
+    "build": "tsdown --config tsdown.config.mjs",
+    "check:listing": "node bin/check-listing.mjs"
+  },
+  "devDependencies": {
+    "@codemirror/commands": "^6.6.0",
+    "@codemirror/lang-java": "^6.0.1",
+    "@codemirror/language": "^6.10.0",
+    "@codemirror/search": "^6.5.0",
+    "@codemirror/state": "^6.4.0",
+    "@codemirror/view": "^6.26.0",
+    "@lezer/highlight": "^1.2.0",
+    "react": "^18.2.0",
+    "react-dom": "^18.2.0",
+    "tsdown": "^0.22.14",
+    "@codemirror/lang-css": "^6.0.0",
+    "@codemirror/lang-html": "^6.0.0",
+    "@codemirror/lang-javascript": "^6.0.0",
+    "@codemirror/lang-json": "^6.0.0",
+    "@codemirror/lang-markdown": "^6.0.0",
+    "@codemirror/lang-sql": "^6.0.0",
+    "@codemirror/lang-vue": "^6.0.0",
+    "@codemirror/lang-xml": "^6.0.0",
+    "@codemirror/lang-yaml": "^6.0.0"
+  }
+}
