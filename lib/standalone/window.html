@@ -1,0 +1,323 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<!-- The IDE panel resolves every host route against document.baseURI
+     (`routeUrl`), so an explicit root base keeps this page talking to the same
+     origin the DSH window uses — same port, same cookie, no new server. -->
+<base href="/" />
+<title>RIS-IDE</title>
+<style>
+  /* This page deliberately does NOT boot the DSH frontend: no session, no
+     conversation, no plugin bundles. It is one panel and nothing else, so an
+     all-day window does not grow with the session history. */
+  :root { color-scheme: light dark; }
+  html, body { height: 100%; margin: 0; }
+  body {
+    font-family: system-ui, -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif;
+    background: Canvas; color: CanvasText;
+  }
+  #root { height: 100%; min-height: 0; }
+  /* Loading / failure notice. Overlaid on purpose: the mount target stays empty
+     (React 18 createRoot does not clear an existing child) and is hidden once the
+     panel has mounted. */
+  #boot {
+    position: fixed; inset: 0; display: flex; align-items: center; justify-content: center;
+    padding: 24px; text-align: center; font-size: 13px; line-height: 1.6; opacity: 0.8;
+  }
+  #boot code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+</style>
+</head>
+<body>
+<div id="boot">正在加载 RIS-IDE…</div>
+<div id="root"></div>
+<script>
+  // ONE IDE window per workspace. Clicking ⧉ RIS-IDE again must not stack windows:
+  // this page claims a per-workspace lock BEFORE booting the panel.
+  //
+  // IMPORTANT (dsh restart): `window.open(url, sameName)` REUSES the window the
+  // user already has open — the browser navigates it, and the OLD document may
+  // still be releasing its lock while this one boots. So a failed claim is
+  // retried for ~1.2s before we believe a second window really exists; and even
+  // then we never auto-close (that made the new window flash and vanish). The
+  // page shows a notice instead, with "切换到已有窗口" / "仍然在这里打开".
+  (function () {
+    var resolveClaim
+    window.__risIdeClaimReady = new Promise(function (resolve) { resolveClaim = resolve })
+    var claim = { blocked: false }
+    window.__risIdeClaim = claim
+    var params = new URLSearchParams(window.location.search)
+    var cwd = params.get('cwd') || ''
+    // The opener passes the workspace-derived window name (`wname`); the hash
+    // fallback keeps older bookmarked URLs working. The lock key IS that name, so
+    // a second page cannot take it while the first one is alive.
+    var value = String(cwd).replace(/[\\/]+$/, '')
+    var hash = 0
+    for (var index = 0; index < value.length; index += 1) hash = ((hash * 31) + value.charCodeAt(index)) | 0
+    var windowName = params.get('wname') || ('dsh-ris-ide-window-' + (hash >>> 0).toString(36))
+    var key = windowName
+    var channel = null
+    try { channel = typeof BroadcastChannel === 'function' ? new BroadcastChannel(key) : null } catch (error) { channel = null }
+    var boot = document.getElementById('boot')
+    /** Best effort: ask any other IDE window to come forward before we go away. */
+    function nudgeHolder() {
+      try { if (channel !== null) channel.postMessage({ type: 'focus' }) } catch (error) { /* closed */ }
+    }
+    /**
+     * Ask the browser to raise this window and report back whether it did.
+     *
+     * Chrome does not let a page raise a window another document opened, so the
+     * opener cannot tell success from silence. The window itself can: it calls
+     * focus() and then says whether it now HAS the document focus. The opener uses
+     * that ack to decide between "brought forward" and "open it for the user".
+     */
+    function answerFocus() {
+      try { window.focus() } catch (error) { /* ignore */ }
+      var focused = false
+      try { focused = document.hasFocus() === true } catch (error) { focused = false }
+      try { if (channel !== null) channel.postMessage({ type: 'focus-ack', focused: focused }) } catch (error) { /* closed */ }
+    }
+    function button(label, onClick) {
+      var node = document.createElement('button')
+      node.type = 'button'
+      node.textContent = label
+      node.style.cssText = 'margin:0 4px;padding:4px 10px;font:inherit;cursor:pointer'
+      node.addEventListener('click', onClick)
+      return node
+    }
+    /**
+     * Another window holds the lock: offer a choice, never close this one.
+     *
+     * Focusing another browser window is not reliably allowed (Chrome ignores a
+     * background window's focus()), so the two honest choices are: keep the old
+     * window and drop this one, or ask the old window to close itself (it was
+     * opened by script, so it may) and take over here.
+     */
+    function showBlocked() {
+      claim.blocked = true
+      if (boot === null) { resolveClaim(false); return }
+      boot.textContent = ''
+      var text = document.createElement('div')
+      text.textContent = 'RIS-IDE 已在另一个窗口打开（一个工作空间只保留一个窗口）。'
+      var row = document.createElement('div')
+      row.style.marginTop = '10px'
+      row.appendChild(button('关闭这个窗口', function () {
+        nudgeHolder()
+        try { window.close() } catch (error) { /* already gone */ }
+      }))
+      row.appendChild(button('关闭旧窗口，在这里打开', function () {
+        text.textContent = '正在关闭旧窗口…'
+        row.textContent = ''
+        try { if (channel !== null) channel.postMessage({ type: 'close' }) } catch (error) { /* closed */ }
+        takeover()
+      }))
+      boot.appendChild(text)
+      boot.appendChild(row)
+      resolveClaim(false)
+    }
+    /** Boot here once the old window has let go of the lock (best effort, ~2 s). */
+    function takeover() {
+      var locksNow = typeof navigator !== 'undefined' ? navigator.locks : undefined
+      var deadline = Date.now() + 2000
+      function attempt() {
+        if (locksNow === undefined || typeof locksNow.request !== 'function') {
+          // Without Web Locks there is nothing to wait for.
+          startHere()
+          return
+        }
+        locksNow.request(key, { ifAvailable: true }, function (lock) {
+          if (lock !== null) {
+            claim.blocked = false
+            startHere()
+            return new Promise(function () { /* hold the lock here instead */ })
+          }
+          if (Date.now() >= deadline) {
+            if (boot !== null) boot.textContent = '旧窗口没有关闭（可能被浏览器阻止）。请手动关掉它后重试。'
+            return undefined
+          }
+          setTimeout(attempt, 150)
+          return undefined
+        }).catch(function () {
+          if (Date.now() >= deadline) return
+          setTimeout(attempt, 150)
+        })
+      }
+      attempt()
+    }
+    function startHere() {
+      claim.blocked = false
+      // The window that ends up running is the one that must hear "close"/"focus":
+      // installing the hooks here covers every route that boots a window (first
+      // claim, manual takeover, no-Web-Locks probe) - the old window's hooks die
+      // with it, so the NEW window has to carry them.
+      becomeHolder()
+      if (boot !== null) boot.textContent = '正在加载 RIS-IDE…'
+      if (typeof window.__risIdeBootPanel === 'function') window.__risIdeBootPanel()
+    }
+    /** The DSH page asked us to make room for a fresh window: close ourselves. */
+    function closeForOpener() {
+      try { window.close() } catch (error) { /* already gone */ }
+    }
+    function becomeHolder() {
+      if (channel === null) return
+      channel.onmessage = function (event) {
+        var data = event !== null && event !== undefined ? event.data : null
+        if (data === null || typeof data !== 'object') return
+        if (data.type === 'focus') answerFocus()
+        else if (data.type === 'close') closeForOpener()
+      }
+    }
+    var locks = typeof navigator !== 'undefined' ? navigator.locks : undefined
+    if (locks && typeof locks.request === 'function') {
+      var attempt = 0
+      function tryClaim() {
+        attempt += 1
+        locks.request(key, { ifAvailable: true }, function (lock) {
+          if (lock === null) {
+            // A reused window's previous document can still hold the lock for a
+            // moment; retry with a short backoff before declaring a second window.
+            if (attempt < 5) { setTimeout(tryClaim, 120 * attempt); return undefined }
+            showBlocked()
+            becomeHolder()
+            return undefined
+          }
+          becomeHolder()
+          resolveClaim(true)
+          // Hold the lock for the lifetime of this window.
+          return new Promise(function () { /* never resolves */ })
+        }).catch(function () {
+          if (attempt < 5) setTimeout(tryClaim, 120 * attempt)
+          else { showBlocked(); becomeHolder() }
+        })
+      }
+      tryClaim()
+      return
+    }
+    if (channel === null) { becomeHolder(); resolveClaim(true); return }
+    // No Web Locks: ask any live IDE window on this channel whether it is there.
+    var answered = false
+    channel.onmessage = function (event) {
+      var data = event !== null && event !== undefined ? event.data : null
+      if (data === null || typeof data !== 'object') return
+      if (data.type === 'close') {
+        // The DSH page wants a fresh window: close ourselves to free the slot.
+        closeForOpener()
+        return
+      }
+      if (data.type === 'focus') {
+        // The DSH page found us in the host registry and asked us to come forward.
+        answerFocus()
+        return
+      }
+      if (data.type === 'ping') {
+        try { channel.postMessage({ type: 'pong' }) } catch (error) { /* ignore */ }
+        try { window.focus() } catch (error) { /* ignore */ }
+        return
+      }
+      if (data.type === 'pong' && !answered) { answered = true; showBlocked() }
+    }
+    try { channel.postMessage({ type: 'ping' }) } catch (error) { /* ignore */ }
+    setTimeout(function () { if (!answered) { becomeHolder(); resolveClaim(true) } }, 400)
+  })()
+</script>
+<script src="dsh-ris-ide/window/vendor/react.js"></script>
+<script src="dsh-ris-ide/window/vendor/react-dom.js"></script>
+<script>
+  // The browser half is the SAME lib/client.js the DSH page loads; it asks the
+  // module loader for its factory and nothing else, so this shim is the whole
+  // adaptation layer (the only import it performs is `require('react')`).
+  window.__ModuleLoader__ = {
+    load: function (spec) { window.__risIdeSpec = spec },
+  }
+</script>
+<script src="dsh-ris-ide/window/app.js"></script>
+<script>
+  (function () {
+    /** Show a boot failure in the static overlay; never throws (the overlay may be gone). */
+    function failBoot(message) {
+      try {
+        var boot = document.getElementById('boot')
+        if (boot === null) return
+        boot.textContent = 'RIS-IDE 无法启动：' + message + '（关掉本窗口，在主界面重新打开）'
+      } catch {
+        // Nothing left to show it in — the console below carries the detail.
+      }
+    }
+    function bootPanel() {
+    var root = document.getElementById('root')
+    var boot = document.getElementById('boot')
+    function fail(message) {
+      failBoot(message)
+    }
+    var spec = window.__risIdeSpec
+    if (!spec || typeof spec.factory !== 'function') { fail('客户端脚本没有加载'); return }
+    if (typeof window.React !== 'object' || typeof window.ReactDOM !== 'object') { fail('React 没有加载'); return }
+    var client
+    try {
+      client = spec.factory(function (id) {
+        if (id === 'react') return window.React
+        if (id === 'react-dom/client') return window.ReactDOM
+        throw new Error('require("' + id + '") 在独立窗口中不可用')
+      })
+    } catch (error) {
+      fail((error && error.message) || String(error))
+      return
+    }
+    // Fill the screen's work area = "maximized" for a script-opened window: the
+    // opener asks for it, but browsers sometimes clamp popup sizes, and a window
+    // opened by same-origin script may size itself. Never fatal — if the browser
+    // refuses, the window keeps the size the opener requested.
+    try {
+      if (window.screen && typeof window.screen.availWidth === 'number' && window.screen.availWidth > 0) {
+        window.moveTo(0, 0)
+        window.resizeTo(window.screen.availWidth, window.screen.availHeight)
+      }
+    } catch (error) {
+      /* keep the opener size */
+    }
+    var params = new URLSearchParams(window.location.search)
+    var sessionId = params.get('sessionId') || ''
+    var cwd = params.get('cwd') || ''
+    var programId = params.get('programId') || ''
+    // `debug=1` (the compact panel's 🐞 button) starts the JDWP session on arrival.
+    var debug = params.get('debug') === '1'
+    document.title = 'RIS-IDE' + (cwd === '' ? '' : ' — ' + cwd)
+    if (typeof client.mountStandalone !== 'function') { fail('客户端脚本版本太旧'); return }
+    Promise.resolve(client.mountStandalone(root, {
+      sessionId: sessionId,
+      cwd: cwd,
+      programId: programId,
+      debug: debug,
+      // Same name the DSH page computes for this workspace: the stream registers
+      // under it, and `window.open('', name)` finds this very window.
+      windowName: params.get('wname') || '',
+    })).then(function () {
+      // The panel paints itself; drop the loading overlay so it cannot swallow clicks.
+      boot.style.display = 'none'
+    }, function (error) {
+      fail((error && error.message) || String(error))
+    })
+    }
+    // Boot only once the one-window claim has settled: a REPLACED window (same
+    // name, dsh restarted) retries the lock first, and a genuinely second window
+    // gets the notice/choice instead of being closed under the user.
+    window.__risIdeBootPanel = bootPanel
+    // The boot chain itself is fenced too: a throw here used to become an
+    // unhandled rejection in a page that has no error UI (blank window).
+    Promise.resolve(window.__risIdeClaimReady).then(function () {
+      if (window.__risIdeClaim && window.__risIdeClaim.blocked === true) return
+      try {
+        bootPanel()
+      } catch (error) {
+        console.error('[dsh-ris-ide] boot failed', error)
+        failBoot((error && error.message) || String(error))
+      }
+    }).catch(function (error) {
+      console.error('[dsh-ris-ide] boot rejected', error)
+      failBoot((error && error.message) || String(error))
+    })
+  })()
+</script>
+</body>
+</html>

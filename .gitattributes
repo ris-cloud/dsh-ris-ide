@@ -1,0 +1,15 @@
+# 设置默认行为，让 Git 自动识别并规范化文本文件
+* text=auto
+
+# 强制这些文件在检出时使用 LF
+*.js text eol=lf
+*.py text eol=lf
+*.html text eol=lf
+*.css text eol=lf
+*.sh text eol=lf
+*.md text eol=lf
+*.json text eol=lf
+*.yml text eol=lf
+
+# 强制 Windows 批处理文件在检出时使用 CRLF
+*.bat text eol=crlf
