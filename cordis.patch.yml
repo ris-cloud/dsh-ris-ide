@@ -1,0 +1,25 @@
+# dsh-ris-ide bundle patch
+#
+# This file is the `dsh.bundle.patch` layer of this local package: the DSH
+# profile launcher merges it after every bundle layer, and the single `insert`
+# below mounts the plugin row.
+#
+# Install + mount in one step (from anywhere):
+#
+#   dsh plugin --profile web add ~/workspace/dsh-ris-ide
+#
+# The `dsh plugin` command forwards to pnpm inside the profile directory and
+# reconciles `dsh.profile.bundles` against the installed packages, so seeing
+# `dsh.bundle.patch` in package.json it appends `dsh-ris-ide` to the bundle
+# stack as well. Remove with:
+#
+#   dsh plugin --profile web remove dsh-ris-ide
+#
+# Contract note (same trap the ego-browser plugin documents): the Loader
+# specifier (`name`) MUST equal the package.json `name` — the client-modules
+# scan matches the nearest package manifest against the Loader specifier and
+# keys the browser bundle by the package name (`window.__ModuleLoader__.load`
+# id `dsh-ris-ide`). Only the row `id` may be a short alias.
+- insert:
+    - id: ris-ide
+      name: 'dsh-ris-ide'
